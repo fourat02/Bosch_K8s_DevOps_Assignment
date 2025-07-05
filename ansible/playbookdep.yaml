@@ -1,0 +1,355 @@
+# Main playbook file: site.yml
+- name: Deploy Todo Application with K3s
+  hosts: myhosts
+  become: yes
+
+  tasks:
+    - name: Update system packages
+      apt:
+        update_cache: yes
+        upgrade: dist
+      when: ansible_os_family == "Debian"
+
+    - name: Install required packages
+      apt:
+        name:
+          - curl
+          - wget
+          - apt-transport-https
+          - ca-certificates
+          - gnupg
+          - lsb-release
+        state: present
+      when: ansible_os_family == "Debian"
+
+    - name: Ensure pip is installed
+      apt:
+        name: python3-pip
+        state: present
+      become: yes
+
+    - name: Ensure Python Kubernetes client is installed
+      pip:
+        name: kubernetes
+        executable: pip3
+      become: yes
+
+    - name: Check if K3s is already installed
+      stat:
+        path: /usr/local/bin/k3s
+      register: k3s_installed
+
+    - name: Download and install K3s
+      shell: |
+        curl -sfL https://get.k3s.io | sh -
+      when: not k3s_installed.stat.exists
+
+    - name: Wait for K3s to be ready
+      wait_for:
+        port: 6443
+        host: "{{ ansible_default_ipv4.address }}"
+        timeout: 300
+
+    - name: Create .kube directory
+      file:
+        path: /home/{{ ansible_user }}/.kube
+        state: directory
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0755'
+
+    - name: Copy kubeconfig to user directory
+      copy:
+        src: /etc/rancher/k3s/k3s.yaml
+        dest: /home/{{ ansible_user }}/.kube/config
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0644'
+        remote_src: yes
+
+    - name: Set KUBECONFIG environment variable
+      lineinfile:
+        path: /home/{{ ansible_user }}/.bashrc
+        line: 'export KUBECONFIG=/etc/rancher/k3s/k3s.yaml'
+        create: yes
+
+    - name: Give permission to kubectl
+      shell: |
+        chmod 7777 /etc/rancher/k3s/k3s.yaml
+      when: k3s_installed.stat.exists
+
+    - name: Create namespace
+      kubernetes.core.k8s:
+        name: "{{ app_namespace }}"
+        api_version: v1
+        kind: Namespace
+        state: present
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+
+    - name: Create SQLite data directory on host
+      file:
+        path: /opt/todo-data
+        state: directory
+        mode: '0777'
+
+    - name: Create SQLite PersistentVolume
+      kubernetes.core.k8s:
+        definition:
+          apiVersion: v1
+          kind: PersistentVolume
+          metadata:
+            name: todo-sqlite-pv
+            labels: "{{ app_labels }}"
+          spec:
+            capacity:
+              storage: 512Mi
+            accessModes:
+              - ReadWriteOnce
+            persistentVolumeReclaimPolicy: Retain
+            storageClassName: local-storage
+            local:
+              path: /opt/todo-data
+            nodeAffinity:
+              required:
+                nodeSelectorTerms:
+                - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                    - "{{ ansible_hostname }}"
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+
+    - name: Create SQLite PersistentVolumeClaim
+      kubernetes.core.k8s:
+        definition:
+          apiVersion: v1
+          kind: PersistentVolumeClaim
+          metadata:
+            name: todo-sqlite-pvc
+            namespace: "{{ app_namespace }}"
+            labels: "{{ app_labels }}"
+          spec:
+            accessModes:
+              - ReadWriteOnce
+            resources:
+              requests:
+                storage: 512Mi
+            storageClassName: local-storage
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+
+    - name: Create MySQL secret
+      kubernetes.core.k8s:
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: mysql-secret
+            namespace: "{{ app_namespace }}"
+            labels: "{{ app_labels }}"
+          type: Opaque
+          data:
+            mysql-root-password: "{{ mysql_root_password | b64encode }}"
+            mysql-password: "{{ mysql_password | b64encode }}"
+            mysql-database: "{{ mysql_database | b64encode }}"
+            mysql-user: "{{ mysql_user | b64encode }}"
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+      # when: enable_mysql_fallback | default(false)
+
+    - name: Deploy MySQL
+      kubernetes.core.k8s:
+        definition:
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: mysql
+            namespace: "{{ app_namespace }}"
+            labels: "{{ app_labels }}"
+          spec:
+            replicas: "{{ app_replicas }}"
+            selector:
+              matchLabels:
+                app: mysql
+            template:
+              metadata:
+                labels: "{{ app_labels | combine({'app': 'mysql'}) }}"
+              spec:
+                containers:
+                  - name: mysql
+                    image: mysql:8.0
+                    env:
+                      - name: MYSQL_ROOT_PASSWORD
+                        valueFrom:
+                          secretKeyRef:
+                            name: mysql-secret
+                            key: mysql-root-password
+                      - name: MYSQL_DATABASE
+                        valueFrom:
+                          secretKeyRef:
+                            name: mysql-secret
+                            key: mysql-database
+                      - name: MYSQL_USER
+                        valueFrom:
+                          secretKeyRef:
+                            name: mysql-secret
+                            key: mysql-user
+                      - name: MYSQL_PASSWORD
+                        valueFrom:
+                          secretKeyRef:
+                            name: mysql-secret
+                            key: mysql-password
+                    ports:
+                      - containerPort: 3306
+                    resources:
+                      requests:
+                        memory: "256Mi"
+                        cpu: "250m"
+                      limits:
+                        memory: "512Mi"
+                        cpu: "500m"
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+      # when: enable_mysql_fallback | default(false)
+
+    - name: Create MySQL Service
+      kubernetes.core.k8s:
+        definition:
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: mysql-service
+            namespace: "{{ app_namespace }}"
+            labels: "{{ app_labels }}"
+          spec:
+            selector:
+              app: mysql
+            ports:
+              - port: 3306
+                targetPort: 3306
+            type: ClusterIP
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+      # when: enable_mysql_fallback | default(false)
+
+    - name: Create ConfigMap for Todo App Environment
+      kubernetes.core.k8s:
+        definition:
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: todo-config
+            namespace: "{{ app_namespace }}"
+            labels: "{{ app_labels }}"
+          data:
+            NODE_ENV: "{{ node_env | default('production') }}"
+            PORT: "{{ todo_app_port | string }}"
+            SQLITE_DB_LOCATION: "/etc/todos/todo.db"
+            DB_TYPE: "{{ db_type | default('SQLITE') }}"
+            # MySQL fallback configuration
+            MYSQL_HOST: "{{ 'mysql-service' if enable_mysql_fallback else '' }}"
+            MYSQL_PORT: "3306"
+            MYSQL_DATABASE: "{{ mysql_database | default('') }}"
+            MYSQL_USER: "{{ mysql_user | default('') }}"
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+
+    - name: Deploy Todo Application
+      kubernetes.core.k8s:
+        definition:
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: todo-app
+            namespace: "{{ app_namespace }}"
+            labels: "{{ app_labels }}"
+          spec:
+            replicas: "{{ app_replicas }}"
+            selector:
+              matchLabels:
+                app: todo-app
+            template:
+              metadata:
+                labels: "{{ app_labels | combine({'app': 'todo-app'}) }}"
+              spec:
+                containers:
+                  - name: todo-app
+                    image: "{{ todo_app_image }}"
+                    ports:
+                      - containerPort: "{{ todo_app_port }}"
+                    env:
+                      - name: NODE_ENV
+                        valueFrom:
+                          configMapKeyRef:
+                            name: todo-config
+                            key: NODE_ENV
+                      - name: PORT
+                        valueFrom:
+                          configMapKeyRef:
+                            name: todo-config
+                            key: PORT
+                      - name: SQLITE_DB_LOCATION
+                        valueFrom:
+                          configMapKeyRef:
+                            name: todo-config
+                            key: SQLITE_DB_LOCATION
+                      - name: DB_TYPE
+                        valueFrom:
+                          configMapKeyRef:
+                            name: todo-config
+                            key: DB_TYPE
+                      # MySQL fallback environment variables
+                      - name: MYSQL_HOST
+                        valueFrom:
+                          configMapKeyRef:
+                            name: todo-config
+                            key: MYSQL_HOST
+                      - name: MYSQL_PORT
+                        valueFrom:
+                          configMapKeyRef:
+                            name: todo-config
+                            key: MYSQL_PORT
+                      - name: MYSQL_DATABASE
+                        valueFrom:
+                          configMapKeyRef:
+                            name: todo-config
+                            key: MYSQL_DATABASE
+                      - name: MYSQL_USER
+                        valueFrom:
+                          configMapKeyRef:
+                            name: todo-config
+                            key: MYSQL_USER
+                      - name: MYSQL_PASSWORD
+                        valueFrom:
+                          secretKeyRef:
+                            name: mysql-secret
+                            key: mysql-password
+                            optional: true
+                    volumeMounts:
+                      - name: sqlite-storage
+                        mountPath: /etc/todos
+                    resources:
+                      requests:
+                        memory: "128Mi"
+                        cpu: "100m"
+                      limits:
+                        memory: "256Mi"
+                        cpu: "200m"
+                volumes:
+                  - name: sqlite-storage
+                    persistentVolumeClaim:
+                      claimName: todo-sqlite-pvc
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+
+    - name: Create Todo App Service
+      kubernetes.core.k8s:
+        definition:
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: todo-service
+            namespace: "{{ app_namespace }}"
+            labels: "{{ app_labels }}"
+          spec:
+            selector:
+              app: todo-app
+            ports:
+              - port: 8081
+                targetPort: "{{ todo_app_port }}"
+            type: LoadBalancer
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
