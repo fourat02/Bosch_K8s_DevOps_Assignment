@@ -80,11 +80,27 @@
 
     - name: Create namespace
       kubernetes.core.k8s:
-        name: "{{ app_namespace }}"
         api_version: v1
+        name: "{{ app_namespace }}"
         kind: Namespace
         state: present
         kubeconfig: /etc/rancher/k3s/k3s.yaml
+
+    - name: Check if Traefik CRDs are installed
+      kubernetes.core.k8s_info:
+        api_version: apiextensions.k8s.io/v1
+        kind: CustomResourceDefinition
+        name: ingressroutes.traefik.containo.us
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+      register: traefik_crd_check
+      ignore_errors: yes
+
+    - name: Install Traefik CRDs from official manifest
+      kubernetes.core.k8s:
+        state: present
+        src: https://raw.githubusercontent.com/traefik/traefik/v3.4/docs/content/reference/dynamic-configuration/kubernetes-crd-definition-v1.yml
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+      when: traefik_crd_check.failed or not traefik_crd_check.resources
 
     - name: Create SQLite data directory on host
       file:
@@ -336,7 +352,7 @@
                       claimName: todo-sqlite-pvc
         kubeconfig: /etc/rancher/k3s/k3s.yaml
 
-    - name: Create Todo App Service
+    - name: Create Todo App Service (ClusterIP for Ingress)
       kubernetes.core.k8s:
         definition:
           apiVersion: v1
@@ -349,7 +365,75 @@
             selector:
               app: todo-app
             ports:
-              - port: 8081
+              - port: 3000
                 targetPort: "{{ todo_app_port }}"
-            type: LoadBalancer
+                protocol: TCP
+            type: ClusterIP
         kubeconfig: /etc/rancher/k3s/k3s.yaml
+
+    - name: Create Traefik Middleware for Todo App
+      kubernetes.core.k8s:
+        definition:
+          apiVersion: traefik.io/v1alpha1
+          kind: Middleware
+          metadata:
+            name: todo-middleware
+            namespace: "{{ app_namespace }}"
+            labels: "{{ app_labels }}"
+          spec:
+            headers:
+              customResponseHeaders:
+                X-Frame-Options: "DENY"
+                X-Content-Type-Options: "nosniff"
+                X-XSS-Protection: "1; mode=block"
+                Referrer-Policy: "strict-origin-when-cross-origin"
+              contentTypeNosniff: true
+              frameDeny: true
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+
+    - name: Create HTTP IngressRoute
+      kubernetes.core.k8s:
+        definition:
+          apiVersion: traefik.io/v1alpha1
+          kind: IngressRoute
+          metadata:
+            name: todo-app-http
+            namespace: "{{ app_namespace }}"
+            labels: "{{ app_labels }}"
+          spec:
+            entryPoints:
+              - web
+            routes:
+              - match: "Host(`{{ todo_app_hostname }}`)"
+                kind: Rule
+                services:
+                  - name: todo-service
+                    port: 3000
+                middlewares:
+                  - name: todo-middleware
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+
+    - name: Wait for Todo App to be ready
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: Deployment
+        name: todo-app
+        namespace: "{{ app_namespace }}"
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+        wait_condition:
+          type: Available
+          status: "True"
+        wait_timeout: 300
+
+    - name: Display access information
+      debug:
+        msg: |
+          Todo App has been deployed successfully!
+
+          Access URL:
+          - HTTP: http://{{ todo_app_hostname }}
+
+          Make sure to add the following to your /etc/hosts file:
+          {{ ansible_default_ipv4.address }} {{ todo_app_hostname }}
+          Make sure to add the following to your /etc/hosts file:
+          {{ ansible_default_ipv4.address }} {{ todo_app_hostname }}
