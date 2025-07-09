@@ -24,12 +24,8 @@ todo-k3s-ansible/
 
 ## ⚙️ Quick Setup
 
-1. **Create structure**:
-   ```bash
-   mkdir -p roles/{k3s-setup,todo-app}/tasks
-   ```
 
-2. **Configure `inventory.ini`**:
+1. **Configure `inventory.ini`**:
    ```ini
    [myhosts]
    YOUR_HOST_IP ansible_user=YOUR_USER ansible_ssh_private_key_file=~/.ssh/id_rsa
@@ -41,17 +37,17 @@ todo-k3s-ansible/
    # ... other variables
    ```
 
-3. **Deploy**:
+2. **Deploy**:
    ```bash
    ansible-playbook site.yml --ask-become-pass
    ```
 
-4. **Add to `/etc/hosts`**:
+3. **Add to `/etc/hosts`**:
    ```
    YOUR_HOST_IP todo.local
    ```
 
-5. **Access**: `http://todo.local`
+4. **Access**: `http://todo.local`
 
 ## 📚 Usage Commands
 
