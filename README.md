@@ -39,7 +39,7 @@ todo-k3s-ansible/
 
 2. **Deploy**:
    ```bash
-   ansible-playbook site.yml --ask-become-pass
+   ansible-playbook -i inventory.ini site.yml --ask-become-pass
    ```
 
 3. **Add to `/etc/hosts`**:
@@ -53,13 +53,13 @@ todo-k3s-ansible/
 
 ```bash
 # Complete deployment
-ansible-playbook site.yml --ask-become-pass
+ansible-playbook -i inventory.ini site.yml --ask-become-pass
 
 # Infrastructure only (K3s setup)
-ansible-playbook site.yml --ask-become-pass --tags k3s
+ansible-playbook -i inventory.ini site.yml --ask-become-pass --tags k3s
 
 # Application only
-ansible-playbook site.yml --ask-become-pass --tags app
+ansible-playbook -i inventory.ini site.yml --ask-become-pass --tags app
 
 # List available tags
 ansible-playbook site.yml --list-tags
