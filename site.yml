@@ -22,3 +22,5 @@
   roles:
     - role: todo-app
       tags: ['app', 'deployment']
+    - role: ngrok
+      tags: ['ngrok', 'public']

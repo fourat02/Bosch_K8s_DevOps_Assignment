@@ -1,0 +1,166 @@
+---
+# Ngrok setup tasks
+- name: Detect system architecture
+  shell: uname -m
+  register: system_arch
+
+- name: Set ngrok architecture variable
+  set_fact:
+    ngrok_arch: "{{ 'amd64' if system_arch.stdout == 'x86_64' else 'arm64' if system_arch.stdout == 'aarch64' else 'arm' if system_arch.stdout.startswith('arm') else 'amd64' }}"
+
+- name: Display detected architecture
+  debug:
+    msg: "Detected architecture: {{ system_arch.stdout }} -> Using ngrok {{ ngrok_arch }}"
+
+- name: Remove existing ngrok if present
+  file:
+    path: /usr/local/bin/ngrok
+    state: absent
+
+- name: Download ngrok for correct architecture
+  get_url:
+    url: "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-{{ ngrok_arch }}.tgz"
+    dest: /tmp/ngrok.tgz
+    mode: '0644'
+
+- name: Extract ngrok
+  unarchive:
+    src: /tmp/ngrok.tgz
+    dest: /usr/local/bin
+    remote_src: true
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Verify ngrok binary
+  command: /usr/local/bin/ngrok version
+  register: ngrok_version
+  failed_when: ngrok_version.rc != 0
+
+- name: Display ngrok version
+  debug:
+    msg: "Successfully installed: {{ ngrok_version.stdout }}"
+
+- name: Configure ngrok auth token
+  shell: |
+    /usr/local/bin/ngrok config add-authtoken {{ ngrok_auth_token }}
+  when: ngrok_auth_token is defined
+
+- name: Create ngrok systemd service
+  copy:
+    content: |
+      [Unit]
+      Description=Ngrok HTTP tunnel
+      After=network.target
+
+      [Service]
+      Type=simple
+      User=root
+      WorkingDirectory=/root
+      ExecStart=/usr/local/bin/ngrok http 80 --log stdout
+      Restart=always
+      RestartSec=5
+      StandardOutput=journal
+      StandardError=journal
+
+      [Install]
+      WantedBy=multi-user.target
+    dest: /etc/systemd/system/ngrok.service
+    mode: '0644'
+
+- name: Reload systemd
+  systemd:
+    daemon_reload: true
+
+- name: Check if ngrok binary exists and is executable
+  stat:
+    path: /usr/local/bin/ngrok
+  register: ngrok_binary
+
+- name: Ensure ngrok is executable
+  file:
+    path: /usr/local/bin/ngrok
+    mode: '0755'
+    owner: root
+    group: root
+  when: ngrok_binary.stat.exists
+
+- name: Start and enable ngrok service
+  systemd:
+    name: ngrok
+    state: started
+    enabled: true
+  register: ngrok_start
+  failed_when: false
+
+- name: Check ngrok service status
+  systemd:
+    name: ngrok
+  register: ngrok_status
+
+- name: Display ngrok service status
+  debug:
+    msg: |
+      Ngrok service status: {{ ngrok_status.status.ActiveState }}
+      If failed, check logs with: sudo journalctl -u ngrok -n 20
+
+- name: Get ngrok logs if service failed
+  shell: journalctl -u ngrok -n 10 --no-pager
+  register: ngrok_logs
+  when: ngrok_status.status.ActiveState != "active"
+
+- name: Display ngrok logs
+  debug:
+    msg: "Ngrok logs: {{ ngrok_logs.stdout }}"
+  when: ngrok_logs is defined and ngrok_logs.stdout is defined
+
+- name: Try manual ngrok start if service failed
+  shell: |
+    nohup /usr/local/bin/ngrok http 80 > /tmp/ngrok.log 2>&1 &
+    sleep 5
+  when: ngrok_status.status.ActiveState != "active"
+
+- name: Wait for ngrok API to be available
+  wait_for:
+    port: 4040
+    host: localhost
+    timeout: 30
+    delay: 2
+  ignore_errors: true
+
+- name: Get ngrok public URL
+  uri:
+    url: http://localhost:4040/api/tunnels
+    method: GET
+    return_content: true
+  register: ngrok_tunnels
+  retries: 3
+  delay: 3
+  ignore_errors: true
+
+- name: Display ngrok public URL
+  debug:
+    msg: |
+      🌍 Your Todo app is now publicly available at:
+      {{ (ngrok_tunnels.content | from_json).tunnels[0].public_url }}
+
+      📱 Access your app from anywhere using this URL!
+  when:
+    - ngrok_tunnels is defined
+    - ngrok_tunnels.content is defined
+    - ngrok_tunnels.content != ""
+    - (ngrok_tunnels.content | from_json).tunnels | length > 0
+
+- name: Manual ngrok URL check
+  debug:
+    msg: |
+      ⚠️  Automated URL retrieval failed. Manual steps:
+
+      1. Check if ngrok is running: ps aux | grep ngrok
+      2. Get URL manually: curl http://localhost:4040/api/tunnels
+      3. Or visit: http://localhost:4040 in browser
+      4. Check logs: sudo journalctl -u ngrok -f
+
+      If nothing works, run manually: sudo /usr/local/bin/ngrok http 80
+  when:
+    - ngrok_tunnels is not defined or ngrok_tunnels.content is not defined or ngrok_tunnels.content == ""

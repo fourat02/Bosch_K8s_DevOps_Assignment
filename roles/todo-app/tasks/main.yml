@@ -309,7 +309,7 @@
             entryPoints:
               - web
             routes:
-              - match: "Host(`{{ todo_app_hostname }}`)"
+              - match: "PathPrefix(`/`)"
                 kind: Rule
                 services:
                   - name: todo-service
