@@ -1,0 +1,24 @@
+---
+# Main playbook for Todo App K3s deployment
+- name: Deploy Todo Application with K3s
+  hosts: myhosts
+  become: true
+
+  roles:
+    - role: k3s-setup
+      tags: ['k3s', 'infrastructure']
+
+  post_tasks:
+    - name: Wait for K3s to stabilize
+      pause:
+        seconds: 30
+        prompt: "Waiting 30 seconds for K3s cluster to fully stabilize..."
+      tags: ['k3s', 'infrastructure']
+
+- name: Deploy Todo Application
+  hosts: myhosts
+  become: true
+
+  roles:
+    - role: todo-app
+      tags: ['app', 'deployment']

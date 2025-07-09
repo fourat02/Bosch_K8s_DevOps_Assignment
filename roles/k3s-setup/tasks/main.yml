@@ -1,0 +1,99 @@
+# K3s and Traefik CRD setup playbook
+---
+    - name: Update system packages
+      apt:
+        update_cache: yes
+        upgrade: dist
+      when: ansible_os_family == "Debian"
+
+    - name: Install required packages
+      apt:
+        name:
+          - curl
+          - wget
+          - apt-transport-https
+          - ca-certificates
+          - gnupg
+          - lsb-release
+        state: present
+      when: ansible_os_family == "Debian"
+
+    - name: Ensure pip is installed
+      apt:
+        name: python3-pip
+        state: present
+      become: yes
+
+    - name: Ensure Python Kubernetes client is installed
+      pip:
+        name: kubernetes
+        executable: pip3
+      become: yes
+
+    - name: Check if K3s is already installed
+      stat:
+        path: /usr/local/bin/k3s
+      register: k3s_installed
+
+    - name: Download and install K3s
+      shell: |
+        curl -sfL https://get.k3s.io | sh -
+      when: not k3s_installed.stat.exists
+
+    - name: Wait for K3s to be ready
+      wait_for:
+        port: 6443
+        host: "{{ ansible_default_ipv4.address }}"
+        timeout: 300
+
+    - name: Create .kube directory
+      file:
+        path: /home/{{ ansible_user }}/.kube
+        state: directory
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0755'
+
+    - name: Copy kubeconfig to user directory
+      copy:
+        src: /etc/rancher/k3s/k3s.yaml
+        dest: /home/{{ ansible_user }}/.kube/config
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0644'
+        remote_src: yes
+
+    - name: Set KUBECONFIG environment variable
+      lineinfile:
+        path: /home/{{ ansible_user }}/.bashrc
+        line: 'export KUBECONFIG=/etc/rancher/k3s/k3s.yaml'
+        create: yes
+
+    - name: Give permission to kubectl
+      shell: |
+        chmod 7777 /etc/rancher/k3s/k3s.yaml
+      when: k3s_installed.stat.exists
+
+    - name: Check if Traefik CRDs are installed
+      kubernetes.core.k8s_info:
+        api_version: apiextensions.k8s.io/v1
+        kind: CustomResourceDefinition
+        name: ingressroutes.traefik.containo.us
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+      register: traefik_crd_check
+      ignore_errors: yes
+
+    - name: Install Traefik CRDs from official manifest
+      kubernetes.core.k8s:
+        state: present
+        src: https://raw.githubusercontent.com/traefik/traefik/v3.4/docs/content/reference/dynamic-configuration/kubernetes-crd-definition-v1.yml
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+      when: traefik_crd_check.failed or not traefik_crd_check.resources
+
+    - name: Display K3s setup completion
+      debug:
+        msg: |
+          K3s cluster and Traefik CRDs have been installed successfully!
+
+          You can now run the app deployment playbook:
+          ansible-playbook -i inventory.ini app-deployment.yml
